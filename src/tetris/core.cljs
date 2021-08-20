@@ -2,7 +2,8 @@
   (:require
     [reagent.core :as r]
     [reagent.dom :as d]
-    [tetris.game :as game]))
+    [tetris.game :as game]
+    [clojure.core.async :as async]))
 
 ;; -------------------------
 ;; Views
@@ -49,57 +50,33 @@
                          :height           "30px"
                          :border           "solid"
                          :border-width     "1px"}}])]))]
-   [:button {:on-click #(reset! state (game/spawn-piece (game/new-game-state)))
+   [:button {:on-click #(        reset! state (game/spawn-piece (game/new-game-state)))
              :style    {:height "50px" :width "100px"}}
     "New Game"]])
+
+;; -------------------------
+;; Initialize app
+
+(def moves-chan (async/chan))
 
 (defn process-move [e]
   (let [k (.-keyCode e)
         dir ({32 "S" 39 "R" 37 "L" 40 "D" 38 "U"} k)]
     (when (some #{dir} ["R" "L" "U" "D" "S"])
-      (swap! state (partial game/move dir)))))
-
-;; -------------------------
-;; Initialize app
-(def msg (atom 0))
-#_(def ^:mutable gameloop)
+      (async/put! moves-chan dir))))
 
 (defn score->level [_ score]
   (condp >= score
     500 1
-    1000 2
-    2000 3
-    5000 4
-    10000 5
-    20000 6
+    2000 2
+    7000 3
+    15000 4
+    30000 5
+    50000 6
     7))
-;; we have about 0.2 seconds to move until lock, and 3 seconds total of delaying the lock
-;; so, when piece touches, if you don't move in 0.2 seconds, it locks, but you're still on
-;; an overall timer of 3 seconds where it will lock regardless of how much you try moving
-(defn game-tick
-  [game-state]
-  (let [{:keys [board active-piece game-over? score]} @game-state]
-    #_(.log js/console (:coords active-piece))
-    (if game-over?
-      (when (zero? @msg)
-        (swap! msg inc)
-        (.alert js/window "game over!")
-        #_(.clearInterval gameloop)
-        board)
-      (do (when (some game/full? board)
-            (swap! game-state game/clear-rows))
-          (when (nil? active-piece)
-            (swap! game-state game/spawn-piece))
-          (swap! game-state update :level score->level score)
-          (swap! game-state #(if (:game-over? %) % (game/game-down %)))))))
 
-(defn dotick []
-  (.setTimeout js/window
-    #(do (game-tick state) (when-not (:game-over @state) (dotick)))
-    (- 250 (-> @state :level (* 50)))))
-
-(dotick)
-#_(.setInterval js/window #(game-tick state) (/ 1000 (@state :level)))
+(defn update-score [{:keys [score level] :as state}]
+  (update state :level (fn [l] (score->level level  score))))
 
 (defn mount-root []
   (d/render
@@ -110,10 +87,50 @@
   (mount-root)
   (.addEventListener js/window "keydown" process-move))
 
-#_(go-loop [lock-delay (async/timeout 250)
-          total-delay (async/timeout 3000)
-          moves  move-chan]
-  (let [[v c] (alts! [lock-delay total-delay moves])]
-    (cond (= c total-delay) ?
-          (= c lock-delay ?)
-          (= c moves ?))))
+(defn lock-delay []
+  (async/go-loop [lock-delay (async/timeout 250)
+                  total-delay (async/timeout 3000)
+                  gravity (async/timeout (- 450 (* 50 (:level @state))))]
+    (let [[v c] (alts! [lock-delay total-delay moves-chan gravity])]
+      (cond (= c total-delay) (swap! state game/lock-piece)
+            (= c lock-delay)  (swap! state game/lock-piece)
+            (= c gravity) (do (swap! state game/game-down)
+                              (recur lock-delay total-delay
+                                     (async/timeout (- 450 (* 50 (:level @state))))))
+            :else (do (swap! state #(game/move v %))
+                      (recur (async/timeout 250) total-delay gravity))))))
+
+(defn game-tick
+  [gs]
+  (async/go-loop [{:keys [board active-piece game-over? level lock-delay? locked?]} gs
+                  grav-chan (async/timeout (- 450 (* 50 level)))]
+    (cond game-over?
+          (do (.alert js/window "game over!") board)
+
+          lock-delay?
+          (recur (<! (lock-delay)) (async/timeout (- 450 (* 50 level))))
+          ;; without nil check each move will clear while piece still moving
+          (and locked? (some game/row-full? board))
+          (recur (swap! state (fn [s] (-> s game/clear-rows update-score))) grav-chan)
+
+          locked?
+          (recur (swap! state game/spawn-piece) grav-chan)
+
+          :else
+          (let [[move c] (async/alts! [grav-chan moves-chan])]
+            (if (= c grav-chan)
+              (recur (swap! state game/game-down) (async/timeout (- 450 (* 50 level))))
+              (recur (swap! state #(game/move move %)) grav-chan))))))
+
+(game-tick @state)
+
+
+
+
+;; if down move (non hard-drop) is blocked, start the lock delay as a
+;; go block which we wait for by taking from the resultant channel returned
+;; from that block.
+
+;; then in the block, do the lock delay e.g. 3000/250ms updates until locked
+;; then the go block will return to the game-loop where we should start gravity
+;; over and respawn, by recurring or otherwise

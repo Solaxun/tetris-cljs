@@ -11,7 +11,7 @@
 (def O {:type :O :mid [4 0] :coords [[4 0] [5 0] [4 1] [5 1]]})
 (def S {:type :S :mid [4 1] :coords [[4 1] [4 0] [5 0] [3 1]]})
 (def T {:type :T :mid [4 1] :coords [[3 1] [4 1] [5 1] [4 0]]})
-(def Z {:type :Z :mid [4 0] :coords [[4 0] [4 1] [5 1] [3 0]]})
+(def Z {:type :Z :mid [4 1] :coords [[4 0] [4 1] [5 1] [3 0]]})
 
 (defn get-random-piece [] (rand-nth [I J L O S T Z]))
 
@@ -72,11 +72,11 @@
 (defn make-new-rows [n]
   (vec (repeat n (vec (repeat cols " ")))))
 
-(defn full? [row]
+(defn row-full? [row]
   (every? (partial not= " ") row))
 
 (defn clear-rows [{:keys [board active-piece score level lines-cleared] :as game-state}]
-  (let [cleared (remove full? board)
+  (let [cleared (remove row-full? board)
         ncleared (- rows (count cleared))]
     (assoc game-state
       :board (vec (concat (make-new-rows ncleared)
@@ -86,26 +86,28 @@
       :lines-cleared (+ lines-cleared ncleared)
       :ghost-piece nil)))
 
-(defn game-down [{:keys [board active-piece score] :as game-state}]
-  (if (nil? active-piece)
-    game-state
-    (let [piece (piece-down active-piece)]
-      (if (piece-fits? (clear-piece board active-piece) piece)
-        (-> game-state
-            (update :board place-piece active-piece piece)
-            (assoc :active-piece piece))
-        (assoc game-state :active-piece nil)))))
+(defn game-down [{:keys [board active-piece score lock-delay?] :as game-state}]
+  (let [piece (piece-down active-piece)]
+    (if (piece-fits? (clear-piece board active-piece) piece)
+      (-> game-state
+          (update :board place-piece active-piece piece)
+          (assoc :active-piece piece))
+      (assoc game-state :lock-delay? true))))
 
 (defn hard-drop [game-state]
-  ;; nil active piece means can't move further down
-  (some #(when (nil? (:active-piece %1)) %1)
+  ;; start lock delay when you can't move down anymore
+  (some #(when (:lock-delay? %1) (assoc %1 :locked? true :lock-delay? false))
         (iterate game-down game-state)))
 
-;; ghost-piece: take-while not nil and get last active piece?
+(defn lock-piece [game-state]
+  (hard-drop (assoc game-state
+                    :locked? true
+                    :lock-delay? false)))
+
 (defn add-ghost-piece [game-state]
   (let [ghost (->> game-state
                    (iterate game-down)
-                   (take-while #(some? (:active-piece %)))
+                   (take-while #(not (:lock-delay? %)))
                    last
                    :active-piece)]
     (assoc game-state :ghost-piece ghost)))
@@ -115,7 +117,8 @@
     (if-not (piece-fits? board spawned)
       (assoc game-state :game-over? true)
       (-> game-state
-          (update :board place-piece (or active-piece spawned) spawned)
+          (dissoc :locked?)
+          (update :board place-piece spawned spawned)
           (assoc :active-piece spawned)
           (assoc :next3 (concat (rest next3) [(get-random-piece)]))
           add-ghost-piece))))
@@ -132,7 +135,7 @@
 (defn game-right [game-state] (game-move game-state piece-right))
 
 (defn move [dir game-state]
-  (if-not (some? (:active-piece game-state))
+  (if (:locked? game-state)
     game-state
     (-> (case dir
           "U" (rotate-active-piece game-state)
