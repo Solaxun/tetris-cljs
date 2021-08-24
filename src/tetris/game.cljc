@@ -1,19 +1,24 @@
-(ns tetris.game)
+(ns tetris.game
+  (:require [tetris.rotations :as r]))
 
 (def rows 20)
 (def cols 10)
 (def board (vec (repeat rows (vec (repeat cols  " ")))))
 
 ;; pieces, along with their starting positions and rotation-center (:mid)
-(def I {:type :I :mid [4 1] :coords [[3 1] [4 1] [5 1] [6 1]]})
-(def J {:type :J :mid [4 1] :coords [[3 1] [4 1] [5 1] [5 0]]})
-(def L {:type :L :mid [4 1] :coords [[3 1] [4 1] [5 1] [3 0]]})
-(def O {:type :O :mid [4 0] :coords [[4 0] [5 0] [4 1] [5 1]]})
-(def S {:type :S :mid [4 1] :coords [[4 1] [4 0] [5 0] [3 1]]})
-(def T {:type :T :mid [4 1] :coords [[3 1] [4 1] [5 1] [4 0]]})
-(def Z {:type :Z :mid [4 1] :coords [[4 0] [4 1] [5 1] [3 0]]})
+(def I {:type :I :mid [4 1] :coords [[3 1] [4 1] [5 1] [6 1]] :rotation :SRS :facing :u})
+(def J {:type :J :mid [4 1] :coords [[3 1] [4 1] [5 1] [5 0]] :rotation :SRS :facing :u})
+(def L {:type :L :mid [4 1] :coords [[3 1] [4 1] [5 1] [3 0]] :rotation :SRS :facing :u})
+(def O {:type :O :mid [4 0] :coords [[4 0] [5 0] [4 1] [5 1]] :rotation :SRS :facing :u})
+(def S {:type :S :mid [4 1] :coords [[4 1] [4 0] [5 0] [3 1]] :rotation :SRS :facing :u})
+(def T {:type :T :mid [4 1] :coords [[3 1] [4 1] [5 1] [4 0]] :rotation :SRS :facing :u})
+(def Z {:type :Z :mid [4 1] :coords [[4 0] [4 1] [5 1] [3 0]] :rotation :SRS :facing :u})
 
 (defn get-random-piece [] (rand-nth [I J L O S T Z]))
+(defn get-new-piece [prevpiece]
+  (reduce #(if (= %1 %2) %2 (reduced %2))
+          prevpiece
+          (repeatedly 3 get-random-piece)))
 
 (defn new-game-state []
   {:board board
@@ -42,21 +47,13 @@
                              (< y max-y)
                              (not-occupied x y)))
             coords)))
-;; need to store piece type so we know if it's an "O" which doesn't rotate :/
-(defn rotate-piece [{:keys [type mid coords] :as piece}]
-  (if (= type :O)
-    piece
-    (let [rasterized-coords (map #(map - % mid) coords)
-          rotated (map (fn [[x y]] [(- y) x]) rasterized-coords)
-          coords' (map #(map + mid %) rotated)]
-      (assoc piece :coords coords'))))
 
 (defn rotate-active-piece [{:keys [board active-piece] :as game-state}]
-  (let [r (rotate-piece active-piece)]
-    ;; TODO: duplication in this and down move, clear piece to check if fits
-    ;; then clear piece again before placing (in place-piece)
-    (if (piece-fits? (clear-piece board active-piece) r)
-      (-> game-state (update :board place-piece active-piece r) (assoc :active-piece r))
+  (let [new-piece (r/rotate active-piece (clear-piece board active-piece) :r)]
+    (if (piece-fits? (clear-piece board active-piece) new-piece)
+      (-> game-state
+          (update :board place-piece active-piece new-piece)
+          (assoc :active-piece new-piece))
       game-state)))
 
 (defn move-piece [{:keys [mid coords] :as piece} dir]
@@ -75,29 +72,39 @@
 (defn row-full? [row]
   (every? (partial not= " ") row))
 
+(defn score-cleared [ncleared]
+  ({1 100 2 300 3 500 4 800} ncleared))
+
 (defn clear-rows [{:keys [board active-piece score level lines-cleared] :as game-state}]
   (let [cleared (remove row-full? board)
         ncleared (- rows (count cleared))]
     (assoc game-state
       :board (vec (concat (make-new-rows ncleared)
               cleared))
-      :score (+ score (+ (* ncleared 100 level)
-                         (if (>= ncleared 4) 500 0)))
+      :score (-> ncleared (score-cleared) (* level) (+ score))
       :lines-cleared (+ lines-cleared ncleared)
       :ghost-piece nil)))
 
-(defn game-down [{:keys [board active-piece score lock-delay?] :as game-state}]
-  (let [piece (piece-down active-piece)]
-    (if (piece-fits? (clear-piece board active-piece) piece)
-      (-> game-state
-          (update :board place-piece active-piece piece)
-          (assoc :active-piece piece))
-      (assoc game-state :lock-delay? true))))
+(defn game-down
+  ([{:keys [board active-piece score lock-delay?] :as game-state}]
+   (game-down game-state false))
+  ([{:keys [board active-piece score lock-delay?] :as game-state} soft-drop?]
+   (let [piece (piece-down active-piece)]
+     (if (piece-fits? (clear-piece board active-piece) piece)
+       (-> game-state
+           (assoc :score (if soft-drop? (inc score) score))
+           (dissoc :lock-delay?)
+           (update :board place-piece active-piece piece)
+           (assoc :active-piece piece))
+       (assoc game-state :lock-delay? true)))))
 
-(defn hard-drop [game-state]
-  ;; start lock delay when you can't move down anymore
-  (some #(when (:lock-delay? %1) (assoc %1 :locked? true :lock-delay? false))
-        (iterate game-down game-state)))
+(defn hard-drop [{:keys [active-piece points score] :as game-state}]
+  (let [get-max-y #(->> % :coords (map second) (apply max))
+        max-y (get-max-y active-piece)]
+    (some #(when (:lock-delay? %1)
+             (assoc %1 :locked? true :lock-delay? false
+                    :score (+ (- (get-max-y (:active-piece %)) max-y) score)))
+          (iterate game-down game-state))))
 
 (defn lock-piece [game-state]
   (hard-drop (assoc game-state
@@ -120,7 +127,7 @@
           (dissoc :locked?)
           (update :board place-piece spawned spawned)
           (assoc :active-piece spawned)
-          (assoc :next3 (concat (rest next3) [(get-random-piece)]))
+          (assoc :next3 (concat (rest next3) [(get-new-piece (last next3))]))
           add-ghost-piece))))
 
 (defn game-move [{:keys [board active-piece score] :as game-state} move-func]
@@ -139,7 +146,7 @@
     game-state
     (-> (case dir
           "U" (rotate-active-piece game-state)
-          "D" (game-down game-state)
+          "D" (game-down game-state true)
           "L" (game-left game-state)
           "R" (game-right game-state)
           "S" (hard-drop game-state))

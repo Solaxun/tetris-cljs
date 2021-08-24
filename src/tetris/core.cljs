@@ -17,6 +17,8 @@
    :T "#FF00FF"
    :Z "#ff0000"})
 
+(declare start-game)
+
 (defn pending-pieces []
   [:table {:style {:background-color "black" :margin-bottom "20px" :border-collapse "collapse"}}
    (let [queued (:next3 @state)
@@ -50,7 +52,8 @@
                          :height           "30px"
                          :border           "solid"
                          :border-width     "1px"}}])]))]
-   [:button {:on-click #(        reset! state (game/spawn-piece (game/new-game-state)))
+   [:button {:on-click #(do (reset! state (game/spawn-piece (game/new-game-state)))
+                            (start-game @state))
              :style    {:height "50px" :width "100px"}}
     "New Game"]])
 
@@ -58,6 +61,16 @@
 ;; Initialize app
 
 (def moves-chan (async/chan))
+(def lock-delay-ms 500)
+(defn new-grav-chan []
+  (let [level (:level @state)
+        ms-delay (-> (- level 1)
+                     (* 0.007)
+                     (#(- 0.8 %))
+                     (Math/pow (- level 1))
+                     (* 1000)
+                     (Math/round))]
+    (async/timeout ms-delay)))
 
 (defn process-move [e]
   (let [k (.-keyCode e)
@@ -65,18 +78,12 @@
     (when (some #{dir} ["R" "L" "U" "D" "S"])
       (async/put! moves-chan dir))))
 
-(defn score->level [_ score]
-  (condp >= score
-    500 1
-    2000 2
-    7000 3
-    15000 4
-    30000 5
-    50000 6
-    7))
-
-(defn update-score [{:keys [score level] :as state}]
-  (update state :level (fn [l] (score->level level  score))))
+(defn update-score [{:keys [score level lines-cleared] :as state}]
+  (let [a (* level 10)
+        b (max 100 (- (* level 10) 50))] ; questionable if this is needed
+    (update state :level (fn [l] (if (>= lines-cleared a #_(min a b))
+                                  (inc level)
+                                  level)))))
 
 (defn mount-root []
   (d/render
@@ -88,27 +95,40 @@
   (.addEventListener js/window "keydown" process-move))
 
 (defn lock-delay []
-  (async/go-loop [lock-delay (async/timeout 250)
+  (async/go-loop [lock-delay (async/timeout lock-delay-ms)
                   total-delay (async/timeout 3000)
-                  gravity (async/timeout (- 450 (* 50 (:level @state))))]
+                  gravity (new-grav-chan)]
     (let [[v c] (alts! [lock-delay total-delay moves-chan gravity])]
       (cond (= c total-delay) (swap! state game/lock-piece)
             (= c lock-delay)  (swap! state game/lock-piece)
-            (= c gravity) (do (swap! state game/game-down)
+            (= c gravity) (let [s (swap! state game/game-down)]
+                            ;; if unable to move down, lock delay still present
+                            (if (:lock-delay? s)
                               (recur lock-delay total-delay
-                                     (async/timeout (- 450 (* 50 (:level @state))))))
+                                     (new-grav-chan))
+                              ;; successful moves down (gravity or soft drop)
+                              ;; removes lock delay and we continue as normal
+                              s))
             :else (do (swap! state #(game/move v %))
-                      (recur (async/timeout 250) total-delay gravity))))))
+                      ;; TODO: do we need to also remove lock delay on soft-drop
+                      ;; down moves, or is gravity enough?
+                      ;; I think yes bc with longer gravity if you tap down inside
+                      ;;the gravity interval you could get a sudden hard-drop after 3 sec
 
-(defn game-tick
+                      ;; lock delay calibrated near gravity speed? If grav is 10 sec
+                      ;; then you will always hard drop when moving/rotating for 3 secs
+                      ;; if they are close together, maybe don't need to reset on soft drop?
+                      (recur (async/timeout lock-delay-ms) total-delay gravity))))))
+
+(defn start-game
   [gs]
   (async/go-loop [{:keys [board active-piece game-over? level lock-delay? locked?]} gs
-                  grav-chan (async/timeout (- 450 (* 50 level)))]
+                  grav-chan (new-grav-chan)]
     (cond game-over?
           (do (.alert js/window "game over!") board)
 
           lock-delay?
-          (recur (<! (lock-delay)) (async/timeout (- 450 (* 50 level))))
+          (recur (<! (lock-delay)) (new-grav-chan))
           ;; without nil check each move will clear while piece still moving
           (and locked? (some game/row-full? board))
           (recur (swap! state (fn [s] (-> s game/clear-rows update-score))) grav-chan)
@@ -119,18 +139,7 @@
           :else
           (let [[move c] (async/alts! [grav-chan moves-chan])]
             (if (= c grav-chan)
-              (recur (swap! state game/game-down) (async/timeout (- 450 (* 50 level))))
+              (recur (swap! state game/game-down) (new-grav-chan))
               (recur (swap! state #(game/move move %)) grav-chan))))))
 
-(game-tick @state)
-
-
-
-
-;; if down move (non hard-drop) is blocked, start the lock delay as a
-;; go block which we wait for by taking from the resultant channel returned
-;; from that block.
-
-;; then in the block, do the lock delay e.g. 3000/250ms updates until locked
-;; then the go block will return to the game-loop where we should start gravity
-;; over and respawn, by recurring or otherwise
+(start-game @state)
