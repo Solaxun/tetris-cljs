@@ -23,8 +23,8 @@
        :l [[0 0] [1 0] [1 1] [0 -2] [1 -2]]}
    :r {:r [[0 0] [1 0] [1 -1] [0 2] [1 2]]
        :l [[0 0] [1 0] [1 -1] [0 2] [1 2]]}
-   :d {:r [[0 0] [-1 0] [-1 1] [0 -2] [-1 -2]]
-       :l [[0 0] [1 0] [1 1] [0 -2] [1 -2]]}
+   :d {:r [[0 0] [1 0] [1 1] [0 -2] [1 -2]]
+       :l [[0 0] [-1 0] [-1 1] [0 -2] [-1 -2]]}
    :l {:r [[0 0] [-1 0] [-1 -1] [0 2] [-1 2]]
        :l [[0 0] [-1 0] [-1 -1] [0 2] [-1 2]]}})
 
@@ -33,8 +33,8 @@
        :l [[0 0] [-1 0] [2 0] [-1 2] [2 -1]]}
    :r {:r [[0 0] [-1 0] [2 0] [-1 2] [2 -1]]
        :l [[0 0] [2 0] [-1 0] [2 1] [-1 -2]]}
-   :d {:r [[0 0] [1 0] [-2 0] [1 -2] [-2 1]]
-       :l [[0 0] [2 0] [-1 0] [2 1] [-1 -2]]}
+   :d {:r [[0 0] [2 0] [-1 0] [2 1] [-1 -2]]
+       :l [[0 0] [1 0] [-2 0] [1 -2] [-2 1]]}
    :l {:r [[0 0] [1 0] [-2 0] [1 -2] [-2 1]]
        :l [[0 0] [-2 0] [1 0] [-2 -1] [1 2]]}})
 
@@ -89,7 +89,5 @@
   [{:keys [coords mid facing] :as piece} board dir]
   (let [kicks (get-in kick-table [facing dir])
         possible-pieces (map (fn [k] (kick (basic-rotate-right piece) k)) kicks)
-        #_#_ _ (println possible-pieces)
-        new-piece (some #(when (piece-fits? board %) %) possible-pieces)
-        #_#_ _ (println new-piece)]
+        new-piece (some #(when (piece-fits? board %) %) possible-pieces)]
     (or new-piece piece)))

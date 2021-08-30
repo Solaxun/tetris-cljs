@@ -7,7 +7,8 @@
 
 ;; -------------------------
 ;; Views
-(def state (r/atom (game/spawn-piece (game/new-game-state))))
+(defonce state (r/atom (game/spawn-piece (game/new-game-state))))
+
 (def piece-colors
   {:I "#00ffff"
    :J "#FF971C"
@@ -39,8 +40,12 @@
             "Score:" (@state :score) [:br] [:br]
             "Cleared:" (@state :lines-cleared)]
    [:div (map #(:type %) (:next3 @state))]
+   [:div (get-in @state [:hold-piece :piece :type])]
    [:table {:style {:background-color "black" :margin-bottom "20px" :border-collapse "collapse"}}
-    (let [{board :board ghost :ghost-piece {piece-type :type coords :coords} :active-piece} @state]
+    (let [{board :board
+           ghost :ghost-piece
+           hold  :hold-piece
+           {piece-type :type coords :coords} :active-piece} @state]
       (for [[i row] (map-indexed vector board)]
         [:tr
          (for [[j cell] (map-indexed vector row)]
@@ -62,28 +67,29 @@
 
 (def moves-chan (async/chan))
 (def lock-delay-ms 500)
+(def level->gravms
+  (let [gravf #(-> (- % 1)
+                   (* 0.007)
+                   ((fn [x] (- 0.8 x)))
+                   (Math/pow (- % 1))
+                   (* 1000)
+                   (Math/round))]
+    (apply hash-map (mapcat #(vector %1 (gravf %1))
+                            (range 1 21)))))
+
 (defn new-grav-chan []
   (let [level (:level @state)
-        ms-delay (-> (- level 1)
-                     (* 0.007)
-                     (#(- 0.8 %))
-                     (Math/pow (- level 1))
-                     (* 1000)
-                     (Math/round))]
+        ms-delay (level->gravms level)]
     (async/timeout ms-delay)))
 
 (defn process-move [e]
   (let [k (.-keyCode e)
-        dir ({32 "S" 39 "R" 37 "L" 40 "D" 38 "U"} k)]
-    (when (some #{dir} ["R" "L" "U" "D" "S"])
+        dir ({32 "S" 39 "R" 37 "L" 40 "D" 38 "U" 67 "C"} k)]
+    (when (some #{dir} ["R" "L" "U" "D" "S" "C"])
       (async/put! moves-chan dir))))
 
-(defn update-score [{:keys [score level lines-cleared] :as state}]
-  (let [a (* level 10)
-        b (max 100 (- (* level 10) 50))] ; questionable if this is needed
-    (update state :level (fn [l] (if (>= lines-cleared a #_(min a b))
-                                  (inc level)
-                                  level)))))
+(defn update-score [{:keys [starting-level lines-cleared] :as state}]
+  (assoc state :level (+ starting-level (quot lines-cleared 10))))
 
 (defn mount-root []
   (d/render
@@ -94,6 +100,10 @@
   (mount-root)
   (.addEventListener js/window "keydown" process-move))
 
+(defn progress-made? [sold snew]
+  (not= (-> sold :active-piece :coords)
+        (-> snew :active-piece :coords)))
+
 (defn lock-delay []
   (async/go-loop [lock-delay (async/timeout lock-delay-ms)
                   total-delay (async/timeout 3000)
@@ -102,23 +112,30 @@
       (cond (= c total-delay) (swap! state game/lock-piece)
             (= c lock-delay)  (swap! state game/lock-piece)
             (= c gravity) (let [s (swap! state game/game-down)]
-                            ;; if unable to move down, lock delay still present
                             (if (:lock-delay? s)
+                              ;; unable to move down - lock delay still present
                               (recur lock-delay total-delay
                                      (new-grav-chan))
-                              ;; successful moves down (gravity or soft drop)
-                              ;; removes lock delay and we continue as normal
+                              ;; successful gravity move removes lock delay
                               s))
-            :else (do (swap! state #(game/move v %))
-                      ;; TODO: do we need to also remove lock delay on soft-drop
-                      ;; down moves, or is gravity enough?
-                      ;; I think yes bc with longer gravity if you tap down inside
-                      ;;the gravity interval you could get a sudden hard-drop after 3 sec
+            ;; if move is hard drop, return rather than recur
+            ;; for other moves, don't reset if no progress made (e.g. stuck
+            ;; against wall or other pieces), only reset when moves results
+            ;; in a new position
+            :else (let [[s s'] (swap-vals! state #(game/move v %))]
+                    ;; lock delay calibrated near gravity speed? If grav is 10 sec
+                    ;; then you will always hard drop when moving/rotating for 3 secs
+                    ;; if they are close together, maybe don't need to reset on soft drop?
 
-                      ;; lock delay calibrated near gravity speed? If grav is 10 sec
-                      ;; then you will always hard drop when moving/rotating for 3 secs
-                      ;; if they are close together, maybe don't need to reset on soft drop?
-                      (recur (async/timeout lock-delay-ms) total-delay gravity))))))
+                    ;; only successful moves reset the delay - and up to a max of 4 times
+                    ;; to prevent continually spinning.
+                    (if (:locked? s)
+                      s
+                      (recur (if (progress-made? s s')
+                               (async/timeout lock-delay-ms)
+                               lock-delay)
+                             total-delay
+                             gravity)))))))
 
 (defn start-game
   [gs]
@@ -129,9 +146,9 @@
 
           lock-delay?
           (recur (<! (lock-delay)) (new-grav-chan))
-          ;; without nil check each move will clear while piece still moving
+
           (and locked? (some game/row-full? board))
-          (recur (swap! state (fn [s] (-> s game/clear-rows update-score))) grav-chan)
+          (recur (swap! state (comp update-score game/clear-rows)) grav-chan)
 
           locked?
           (recur (swap! state game/spawn-piece) grav-chan)

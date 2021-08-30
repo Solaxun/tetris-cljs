@@ -13,6 +13,7 @@
 (def S {:type :S :mid [4 1] :coords [[4 1] [4 0] [5 0] [3 1]] :rotation :SRS :facing :u})
 (def T {:type :T :mid [4 1] :coords [[3 1] [4 1] [5 1] [4 0]] :rotation :SRS :facing :u})
 (def Z {:type :Z :mid [4 1] :coords [[4 0] [4 1] [5 1] [3 0]] :rotation :SRS :facing :u})
+(def shape->piece (apply hash-map (interleave [:I :J :L :O :S :T :Z] [I J L O S T Z])))
 
 (defn get-random-piece [] (rand-nth [I J L O S T Z]))
 (defn get-new-piece [prevpiece]
@@ -23,9 +24,11 @@
 (defn new-game-state []
   {:board board
    :active-piece nil
+   :hold-piece {:piece nil :ready? true}
    :game-over? false
    :score 0
-   :level 1
+   :level 8
+   :starting-level 8
    :lines-cleared 0
    :next3 (repeatedly 3 get-random-piece)})
 
@@ -39,6 +42,28 @@
     (reduce #(assoc-in %1 (reverse %2) (:type active-piece))
             new-board
             (:coords new-piece))))
+
+(defn fresh-piece [piece] (get shape->piece (:type piece) "sumtingwong"))
+
+(defn hold-piece
+  [{:keys [board active-piece hold-piece next3] :as game-state}]
+  (let [{hpiece :piece ready? :ready?} hold-piece]
+    (cond (nil? hpiece)
+          (-> game-state
+              (update :board place-piece active-piece (first next3))
+              (update :next3 #(-> % rest (concat [(get-new-piece (last next3))])))
+              (assoc :active-piece (first next3))
+              (assoc :hold-piece {:piece (fresh-piece active-piece) :ready? false}))
+
+          ;; whenever a piece locks, `ready?` is set to true
+          ready?
+          (-> game-state
+              (update :board place-piece active-piece hpiece)
+              (assoc :active-piece hpiece)
+              (assoc :hold-piece {:piece (fresh-piece active-piece) :ready? false}))
+
+          :else
+          game-state)))
 
 (defn piece-fits? [board {:keys [mid coords]}]
   (let [[max-x max-y] [cols rows]
@@ -56,7 +81,7 @@
           (assoc :active-piece new-piece))
       game-state)))
 
-(defn move-piece [{:keys [mid coords] :as piece} dir]
+(defn move-piece [{:keys [mid cooqrds] :as piece} dir]
   (let [dir (get {:left [-1 0] :right [1 0] :down [0 1]} dir)]
     (-> piece
         (update :coords #(mapv (partial mapv + dir) %))
@@ -107,9 +132,9 @@
           (iterate game-down game-state))))
 
 (defn lock-piece [game-state]
-  (hard-drop (assoc game-state
-                    :locked? true
-                    :lock-delay? false)))
+  (hard-drop (-> game-state
+                 (assoc :locked? true :lock-delay? false)
+                 (update :hold-piece assoc :ready? true))))
 
 (defn add-ghost-piece [game-state]
   (let [ghost (->> game-state
@@ -149,5 +174,6 @@
           "D" (game-down game-state true)
           "L" (game-left game-state)
           "R" (game-right game-state)
-          "S" (hard-drop game-state))
+          "S" (hard-drop game-state)
+          "C" (hold-piece game-state))
       add-ghost-piece)))
