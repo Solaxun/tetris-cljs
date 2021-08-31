@@ -66,7 +66,12 @@
 ;; Initialize app
 
 (def moves-chan (async/chan))
+(def keydown-chan (async/chan))
+(def keyup-chans {"L" (async/chan) "R" (async/chan)})
 (def lock-delay-ms 500)
+(def delayed-auto-shift-ms 150)
+(def auto-repeat-rate-ms 25)
+
 (def level->gravms
   (let [gravf #(-> (- % 1)
                    (* 0.007)
@@ -82,11 +87,20 @@
         ms-delay (level->gravms level)]
     (async/timeout ms-delay)))
 
-(defn process-move [e]
+(defn process-keydown [e]
   (let [k (.-keyCode e)
+        repeating? (.-repeat e)
         dir ({32 "S" 39 "R" 37 "L" 40 "D" 38 "U" 67 "C"} k)]
     (when (some #{dir} ["R" "L" "U" "D" "S" "C"])
-      (async/put! moves-chan dir))))
+      (cond (and (not= dir "L") (not= dir "R")) (async/put! moves-chan dir)
+            (not repeating?) (async/put! keydown-chan dir)
+            :else nil))))
+
+(defn process-keyup [e]
+  (let [k (.-keyCode e)
+        dir ({39 "R" 37 "L"} k)]
+    (when (some #{dir} ["R" "L"])
+      (async/put! (get keyup-chans dir) dir))))
 
 (defn update-score [{:keys [starting-level lines-cleared] :as state}]
   (assoc state :level (+ starting-level (quot lines-cleared 10))))
@@ -98,7 +112,8 @@
 
 (defn ^:export init! []
   (mount-root)
-  (.addEventListener js/window "keydown" process-move))
+  (.addEventListener js/window "keydown" process-keydown)
+  (.addEventListener js/window "keyup"   process-keyup))
 
 (defn progress-made? [sold snew]
   (not= (-> sold :active-piece :coords)
@@ -159,4 +174,20 @@
               (recur (swap! state game/game-down) (new-grav-chan))
               (recur (swap! state #(game/move move %)) grav-chan))))))
 
+(defn handle-move! [move keyup-chan]
+  ;; initial delay
+  (async/go-loop [repeat-rate (async/timeout delayed-auto-shift-ms)]
+    (async/put! moves-chan move)
+    (let [[v c] (async/alts! [keyup-chan repeat-rate])]
+      (if-not (= c keyup-chan)
+        ;; repeat delay
+        (recur (async/timeout auto-repeat-rate-ms))))))
+
+(defn route-keydowns []
+  (async/go-loop []
+    (let [m (async/<! keydown-chan)]
+      (handle-move! m (get keyup-chans m))
+      (recur))))
+
+(route-keydowns)
 (start-game @state)
